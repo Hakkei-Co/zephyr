@@ -393,6 +393,28 @@
 #define DT_PROP(node_id, prop) DT_CAT(node_id, _P_##prop)
 
 /**
+ * @brief Get a devicetree node's name with unit-address as a string literal
+ *
+ * This returns the node name and unit-address from a node identifier.
+ *
+ * Example devicetree fragment:
+ *
+ *     / {
+ *             soc {
+ *                     node: my-node@12345678 { ... };
+ *             };
+ *     };
+ *
+ * Example usage:
+ *
+ *    DT_NODE_FULL_NAME(DT_NODELABEL(node)) // "my-node@12345678"
+ *
+ * @param node_id node identifier
+ * @return the node's name with unit-address as a string in the devicetree
+ */
+#define DT_NODE_FULL_NAME(node_id) DT_CAT(node_id, _FULL_NAME)
+
+/**
  * @brief Get a property's logical length
  *
  * Here, "length" is a number of elements, which may differ from the
