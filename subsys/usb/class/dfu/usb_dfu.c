@@ -57,6 +57,11 @@
 #include <logging/log.h>
 LOG_MODULE_REGISTER(usb_dfu);
 
+#include <power/reboot.h>
+#if IS_ENABLED(CONFIG_SETTINGS)
+#include <settings/settings.h>
+#endif
+
 #define NUMOF_ALTERNATE_SETTINGS	2
 
 #define USB_DFU_MAX_XFER_SIZE		CONFIG_USB_REQUEST_BUFFER_SIZE
@@ -72,7 +77,6 @@ LOG_MODULE_REGISTER(usb_dfu);
 
 static struct k_poll_event dfu_event;
 static struct k_poll_signal dfu_signal;
-static struct k_timer dfu_timer;
 
 static struct k_work dfu_work;
 
@@ -145,7 +149,7 @@ struct dev_dfu_mode_descriptor dfu_mode_desc = {
 		.bMaxPacketSize0 = USB_MAX_CTRL_MPS,
 		.idVendor = sys_cpu_to_le16((uint16_t)CONFIG_USB_DEVICE_VID),
 		.idProduct =
-			sys_cpu_to_le16((uint16_t)CONFIG_USB_DEVICE_DFU_PID),
+			sys_cpu_to_le16((uint16_t)CONFIG_USB_DEVICE_PID),
 		.bcdDevice = sys_cpu_to_le16(BCDDEVICE_RELNUM),
 		.iManufacturer = 1,
 		.iProduct = 2,
@@ -323,6 +327,11 @@ static struct dfu_data_t dfu_data = {
 	.bwPollTimeout = CONFIG_USB_DFU_DEFAULT_POLLTIMEOUT,
 };
 
+#if IS_ENABLED(CONFIG_SETTINGS)
+static uint8_t usbdfu_status;
+static struct k_work usbdfu_save_work;
+#endif
+
 /**
  * @brief Helper function to check if in DFU app state.
  *
@@ -383,12 +392,6 @@ static void dfu_flash_write(uint8_t *data, size_t len)
 	LOG_DBG("bytes written 0x%x", flash_img_bytes_written(&dfu_data.ctx));
 }
 
-static void dfu_timer_expired(struct k_timer *timer)
-{
-	if (dfu_data.state == appDETACH) {
-		dfu_data.state = appIDLE;
-	}
-}
 
 /**
  * @brief Handler called for DFU Class requests not handled by the USB stack.
@@ -585,19 +588,30 @@ static int dfu_class_handle_req(struct usb_setup_packet *pSetup,
 		}
 		break;
 	case DFU_DETACH:
-		LOG_DBG("DFU_DETACH timeout %d, state %d",
-			pSetup->wValue, dfu_data.state);
+		LOG_DBG("DFU_DETACH reqeust detected.");
 
-		if (dfu_data.state != appIDLE) {
-			dfu_data.state = appIDLE;
-			return -EINVAL;
-		}
-		/* Move to appDETACH state */
-		dfu_data.state = appDETACH;
+		/* Changed DFU_DETACH logic. 
+		*
+		*	Original attempts were changing dfu state from appIDLE to dfuDETACH by DFU_DETACH request.
+		*	And then waiting usb reconnection event with a timer.
+		*
+		*	dfu_data.state = appDETACH;
+		*	k_timer_start(&dfu_timer,K_MESC(timeout),K_FOREVER)
+		*  
+		*	However DFU-UTIL toolset cannot send usb reconnection request to the board on the Windows
+		*	so the USB device descriptor couldn't update by itself.
+		*  
+		*	Current attempt is to store the DFU_DETACH request's flag to internal flash from,
+		*	Allowing the system to reboot by itself and still know the board rebooted 
+		*	due to the DFU_DETACH request. With the flag tripped, prepare the USB descriptor for DFU mode
+		*	and be ready to continue.
+		*
+		*/
+#if IS_ENABLED(CONFIG_SETTINGS)
+		usbdfu_status = 1;
+		k_work_submit_to_queue(&USB_WORK_Q,&usbdfu_save_work);
+#endif
 
-		/* Begin detach timeout timer */
-		timeout = MIN(pSetup->wValue, CONFIG_USB_DFU_DETACH_TIMEOUT);
-		k_timer_start(&dfu_timer, K_MSEC(timeout), K_FOREVER);
 		break;
 	default:
 		LOG_WRN("DFU UNKNOWN STATE: %d", pSetup->bRequest);
@@ -628,20 +642,8 @@ static void dfu_status_cb(struct usb_cfg_data *cfg,
 		break;
 	case USB_DC_RESET:
 		LOG_DBG("USB device reset detected, state %d", dfu_data.state);
-		/* Stop the appDETACH timeout timer */
-		k_timer_stop(&dfu_timer);
 		if (dfu_data.state == appDETACH) {
 			dfu_data.state = dfuIDLE;
-
-			/* Set the DFU mode descriptors to be used after
-			 * reset
-			 */
-			dfu_config.usb_device_description =
-				(uint8_t *) &dfu_mode_desc;
-			if (usb_set_config(dfu_config.usb_device_description)) {
-				LOG_ERR("usb_set_config failed during USB "
-					"device reset");
-			}
 		}
 		break;
 	case USB_DC_CONNECTED:
@@ -789,6 +791,43 @@ static void dfu_work_handler(struct k_work *item)
 	}
 }
 
+#if IS_ENABLED(CONFIG_SETTINGS)
+static int usbdfu_settings_set(const char *name, size_t len, settings_read_cb read_cb,
+                               void *cb_arg) {
+									   
+    const char *next;
+    LOG_DBG("Setting usbdfu value %s", log_strdup(name));	
+	if (settings_name_steq(name, "status", &next) && !next) {
+		if (len != sizeof(usbdfu_status)) {
+            return -EINVAL;
+        }
+
+        int err = read_cb(cb_arg, &usbdfu_status, sizeof(usbdfu_status));
+        if (err <= 0) {
+            LOG_ERR("Failed to handle usbdfu status from settings (err %d)", err);
+            return err;
+        }
+        LOG_DBG("usbdfu status loaded: %d", usbdfu_status);
+	}
+	return 0;
+}
+
+struct settings_handler usbdfu_handler = {.name = "dfu", .h_set = usbdfu_settings_set};
+
+
+static void hakkei_save_usbdfu_work(struct k_work *work) {
+    LOG_DBG("saving dfu/status: %d", usbdfu_status);
+    settings_save_one("dfu/status", &usbdfu_status, sizeof(usbdfu_status));
+	if (usbdfu_status == 1)
+	{
+		/*Rebooting to change USB DFU profile to DFU mode.*/
+		sys_reboot(SYS_REBOOT_COLD);
+	}
+}
+
+
+#endif
+
 static int usb_dfu_init(const struct device *dev)
 {
 	const struct flash_area *fa;
@@ -797,7 +836,6 @@ static int usb_dfu_init(const struct device *dev)
 
 	k_work_init(&dfu_work, dfu_work_handler);
 	k_poll_signal_init(&dfu_signal);
-	k_timer_init(&dfu_timer, dfu_timer_expired, NULL);
 
 	if (flash_area_open(dfu_data.flash_area_id, &fa)) {
 		return -EIO;
@@ -806,6 +844,34 @@ static int usb_dfu_init(const struct device *dev)
 	dfu_data.flash_upload_size = fa->fa_size;
 	flash_area_close(fa);
 
+	#if IS_ENABLED(CONFIG_SETTINGS)
+		settings_subsys_init();
+
+		int err = settings_register(&usbdfu_handler);
+		if (err) {
+			LOG_ERR("Failed to setup the usbdfu settings handler (err %d)", err);
+			return err;
+		}
+
+		k_work_init(&usbdfu_save_work, hakkei_save_usbdfu_work);
+
+		settings_load_subtree("dfu");
+		if (usbdfu_status == 1)
+		{
+			/*
+			 *	System rebooted by the DFU start request.
+			 *	Change dfu_data.state to appDETACH so it is ready to continue DFU progress.
+			 *	Restore usbdfu_status to 0 to avoid repeating entry into DFU mode for subsequent reboots.
+			*/
+			usbdfu_status = 0;
+			k_work_submit_to_queue(&USB_WORK_Q,&usbdfu_save_work);
+			dfu_data.state = appDETACH;		
+			dfu_config.usb_device_description = (uint8_t*)&dfu_mode_desc;
+			LOG_DBG("System rebooted by the DFU start request, retry DFU-UTIL script to continue DFU progress.");
+		}
+
+	#endif
+	
 	return 0;
 }
 
