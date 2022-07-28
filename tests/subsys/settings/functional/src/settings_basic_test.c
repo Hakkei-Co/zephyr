@@ -606,6 +606,7 @@ static void test_direct_loading_filter(void)
 	}
 }
 
+extern void test_setting_storage_get(void);
 
 void test_main(void)
 {
@@ -614,7 +615,8 @@ void test_main(void)
 			 ztest_unit_test(test_support_rtn),
 			 ztest_unit_test(test_register_and_loading),
 			 ztest_unit_test(test_direct_loading),
-			 ztest_unit_test(test_direct_loading_filter)
+			 ztest_unit_test(test_direct_loading_filter),
+			 ztest_unit_test(test_setting_storage_get)
 			);
 
 	ztest_run_test_suite(settings_test_suite);
