@@ -366,6 +366,28 @@ static void dfu_reset_counters(void)
 	}
 }
 
+#ifdef CONFIG_USB_DFU_REBOOT
+static struct k_work_delayable reboot_work;
+
+static void reboot_work_handler(struct k_work *item)
+{
+	ARG_UNUSED(item);
+
+	sys_reboot(SYS_REBOOT_WARM);
+}
+
+static void reboot_schedule(void)
+{
+	LOG_DBG("Scheduling reboot in 500ms");
+
+	/*
+	 * Reboot with a delay,
+	 * so there is some time to send the status to the host
+	 */
+	k_work_schedule_for_queue(&USB_WORK_Q, &reboot_work, K_MSEC(500));
+}
+#endif
+
 static void dfu_flash_write(uint8_t *data, size_t len)
 {
 	bool flush = false;
@@ -393,6 +415,9 @@ static void dfu_flash_write(uint8_t *data, size_t len)
 		}
 
 		k_poll_signal_raise(&dfu_signal, 0);
+#ifdef CONFIG_USB_DFU_REBOOT
+        reboot_schedule();
+#endif
 	} else {
 		dfu_data.state = dfuDNLOAD_IDLE;
 	}
@@ -406,28 +431,6 @@ static void dfu_timer_expired(struct k_timer *timer)
 		dfu_data.state = appIDLE;
 	}
 }
-
-#ifdef CONFIG_USB_DFU_REBOOT
-static struct k_work_delayable reboot_work;
-
-static void reboot_work_handler(struct k_work *item)
-{
-	ARG_UNUSED(item);
-
-	sys_reboot(SYS_REBOOT_WARM);
-}
-
-static void reboot_schedule(void)
-{
-	LOG_DBG("Scheduling reboot in 500ms");
-
-	/*
-	 * Reboot with a delay,
-	 * so there is some time to send the status to the host
-	 */
-	k_work_schedule_for_queue(&USB_WORK_Q, &reboot_work, K_MSEC(500));
-}
-#endif
 
 static int dfu_class_handle_to_host(struct usb_setup_packet *setup,
 				    int32_t *data_len, uint8_t **data)
