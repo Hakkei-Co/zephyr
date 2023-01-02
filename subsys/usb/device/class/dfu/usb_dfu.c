@@ -60,6 +60,14 @@ LOG_MODULE_REGISTER(usb_dfu);
 #define SLOT0_PARTITION			slot0_partition
 #define SLOT1_PARTITION			slot1_partition
 
+// Hakkei 20230102 riz - Allow product name to be different when in DFU mode
+#ifndef CONFIG_USB_DFU_DEVICE_PRODUCT
+#define CONFIG_USB_DFU_DEVICE_PRODUCT CONFIG_USB_DEVICE_PRODUCT
+#else
+#undef CONFIG_USB_DEVICE_PRODUCT
+#define CONFIG_USB_DEVICE_PRODUCT CONFIG_USB_DFU_DEVICE_PRODUCT
+#endif
+
 #define FIRMWARE_IMAGE_0_LABEL "image_0"
 #define FIRMWARE_IMAGE_1_LABEL "image_1"
 
