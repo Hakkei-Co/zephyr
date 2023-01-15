@@ -658,6 +658,12 @@ static int dfu_class_handle_to_device(struct usb_setup_packet *setup,
 		LOG_DBG("DFU_DETACH timeout %d, state %d",
 			setup->wValue, dfu_data.state);
 
+        if (dfu_data.state == appDETACH) {
+            LOG_WRN("resetting USB!");
+            usb_dc_reset();
+            return 0;
+        }
+
 		if (dfu_data.state != appIDLE) {
 			dfu_data.state = appIDLE;
 			return -EINVAL;
